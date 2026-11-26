@@ -80,11 +80,20 @@ def load_base_model_and_tokenizer(
 
 
 def enumerate_eligible_projections(model: nn.Module) -> list[EligibleProjection]:
-    """Enumerate eligible Transformer-block linear projections in canonical order."""
+    """Enumerate eligible Transformer-block linear projections in canonical order.
+
+    Transparently unwraps compensation wrappers (e.g. ScaledLinearWrapper) that
+    expose an underlying nn.Linear via `.linear` so storage accounting and
+    verification remain identical before and after AWQ wrapping.
+    """
     eligible_set = set(ELIGIBLE_PROJECTION_NAMES)
     found: list[EligibleProjection] = []
     for full_name, module in model.named_modules():
-        if not isinstance(module, nn.Linear):
+        if isinstance(module, nn.Linear):
+            target_linear = module
+        elif isinstance(getattr(module, "linear", None), nn.Linear):
+            target_linear = module.linear
+        else:
             continue
         leaf_name = full_name.rsplit(".", 1)[-1]
         if leaf_name not in eligible_set:
@@ -98,7 +107,7 @@ def enumerate_eligible_projections(model: nn.Module) -> list[EligibleProjection]
                 layer_idx=layer_idx,
                 full_name=full_name,
                 proj_name=leaf_name,
-                module=module,
+                module=target_linear,
             )
         )
     proj_order = {name: i for i, name in enumerate(ELIGIBLE_PROJECTION_NAMES)}

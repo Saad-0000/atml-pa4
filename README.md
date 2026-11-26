@@ -14,7 +14,7 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-## Current Stages: Task 1 — Baseline & Pruning (Steps 1, 2, 3, 4, 8)
+## Current Stages: Task 1 Complete (Steps 1–9: Baseline, Pruning, Quantization, Analysis)
 
 ### Implemented Modules
 - `common/seeding.py`: Deterministic seeding (`DEFAULT_SEED = 6304`).
@@ -28,7 +28,8 @@ pip install -r requirements.txt
 - `task1/eval_hellaswag.py`: Zero-shot HellaSwag scoring matching `lm-evaluation-harness` preprocessing and `acc_norm` (character length of preprocessed ending excluding leading space delimiter), saving per-example candidate scores and reporting both full (2,000) and diagnostic (first 512) accuracy.
 - `task1/benchmark.py`: Fixed-shape batch-1 prefill (512, 2048 tokens) and 64-token cached autoregressive decode benchmarks with separate prefill/decode timers and peak GPU memory reporting.
 - `task1/pruning.py`: Unstructured per-row magnitude (P1), Wanda activation-aware pruning (P2), 2:4 semi-structured Wanda diagnostic (Step 8), calibration local projection output error, and exact matched-budget nonuniform allocator (P3).
-- `task1/run_baseline.py`, `task1/run_pruning.py`, `task1/run_p3_nonuniform.py`: CLI entrypoints compatible with `ATML_PA4_Colab_Runner.ipynb` supporting `--smoke` and `--resume`.
+- `task1/quantization.py`: Group-wise asymmetric weight-only PTQ (`group_size=128`, FP16 scales + uint8 zero-points), AWQ activation-dependent per-channel scale search with algebraic `down_proj -> up_proj` folding and explicit FP16 compensation vectors, exact packed-byte accounting, and Q3 greedy marginal-error-per-byte mixed-precision allocator.
+- `task1/run_baseline.py`, `task1/run_pruning.py`, `task1/run_p3_nonuniform.py`, `task1/run_quantization.py`, `task1/run_q3_mixed.py`, `task1/analyze_results.py`: CLI entrypoints compatible with `ATML_PA4_Colab_Runner.ipynb` supporting `--smoke` and `--resume`.
 
 ### Running Local Verification Tests
 ```bash
@@ -65,6 +66,10 @@ python -m unittest discover -s tests -v
   - *Candidate sensitivity probes* (computed on the 128-sequence C4 calibration split only): (i) **OWL Layerwise Outlier Distribution (`owl_lod_m5`)** (Yin et al., 2024) measuring the fraction of Wanda scores exceeding `5 × mean`, and (ii) **Relative Calibration Output Error (`calib_rel_l2_err`)** measuring isolated `||(W_pruned - W_fp16) X||_F / ||W_fp16 X||_F` at the target sparsity.
   - *Constrained allocation rule*: Normalized sensitivity `u_l in [-1, 1]` maps to `s_l = clip(s_target - lambda * u_l + delta, 0.10, 0.85)`, where `delta` is solved by bisection so the parameter-weighted total zero count matches uniform P1/P2, followed by integer-weight slack rounding so `zero_count_diff == 0` while preserving `0.10 <= s_l <= 0.85` on every unit.
   - *Selection rule*: Evaluated over `(probe, lambda in {0.04, 0.08, 0.12, 0.16})` strictly on the 32-sequence C4 development manifest (`c4_development_locked.jsonl.gz`); all candidates (including unsuccessful ones) are saved in `results/p3_allocation_and_sensitivity.json`, and the single frozen winner is evaluated on held-out WikiText-2, C4 validation, and HellaSwag.
+- **Q1/Q2/Q3 Quantization Conventions & Mixed-Precision Allocation**:
+  - *Shared quantizer*: Group-wise asymmetric weight-only PTQ (`group_size=128` along input columns), zero included in `[w_min, w_max]`, FP16 stored scale (all-zero group → `scale=1.0`), uint8 zero-point computed from the stored FP16 scale with ties-to-even rounding (`torch.round`), and exact packed-byte accounting (`ceil(padded_elems * b / 8)` payload + `3` metadata bytes/group + FP16 compensation vectors on non-folded projections + FP16 uncompressed unique weights counted once).
+  - *AWQ scale search & folding (Q2)*: Searches `alpha in {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}` on the 128-sequence C4 calibration split (`s = mean(|X|)^alpha / sqrt(max * min)`), folds `down_proj` inverse input scales algebraically into `up_proj` output rows before `up_proj` quantization, applies `ScaledLinearWrapper` on non-foldable projections (counting their FP16 scale bytes in the matched budget), and verifies full-precision output equivalence before rounding.
+  - *Q3 Mixed-Precision Allocation*: Greedy marginal error-reduction-per-byte allocator over `b in {2, 3, 4, 8}` (HAWQ-V2 / BRECQ style), selecting among three calibration error objectives (`mse_per_byte`, `rel_l2_per_byte`, `l2_per_byte`) and minimum-bit floors strictly on the 32-sequence C4 development split while enforcing `achieved_packed_bytes <= Q2_uniform_budget_bytes`.
 
 ## Attribution
 - Course protocol and dataset schemas: `ATML_PA4.pdf` and `atml-pa4-datasets` (`https://github.com/AbDu11aHHH/atml-pa4-datasets`).
