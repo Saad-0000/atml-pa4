@@ -6,6 +6,7 @@ import datetime
 import gzip
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -155,3 +156,54 @@ def update_condition_status(
     }
     atomic_write_json(path, ledger)
     return ledger
+
+
+def export_final_report_bundle(
+    task_root: str | Path,
+    rel_items: Iterable[str],
+    bundle_dirname: str = "final_report_bundle",
+) -> dict[str, Any]:
+    """Copy final report-ready artifacts into a clean standalone bundle directory.
+
+    Preserves the canonical paths expected by ATML_PA4_Colab_Runner.ipynb while
+    giving the user a single clutter-free folder containing only final tables,
+    JSON summaries, qualitative evidence, configs, and plots.
+    """
+    root = Path(task_root)
+    bundle_root = root / bundle_dirname
+    bundle_root.mkdir(parents=True, exist_ok=True)
+
+    copied: list[str] = []
+    missing: list[str] = []
+    for rel in rel_items:
+        src = root / rel
+        if rel.endswith("/"):
+            if src.is_dir():
+                dst_dir = bundle_root / rel.rstrip("/")
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                files = sorted(p for p in src.iterdir() if p.is_file())
+                if not files:
+                    missing.append(rel)
+                for f in files:
+                    shutil.copy2(f, dst_dir / f.name)
+                    copied.append(f"{rel}{f.name}")
+            else:
+                missing.append(rel)
+        else:
+            if src.is_file() and src.stat().st_size > 0:
+                dst = bundle_root / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied.append(rel)
+            else:
+                missing.append(rel)
+
+    manifest = {
+        "updated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "source_root": str(root),
+        "bundle_root": str(bundle_root),
+        "copied_files": copied,
+        "missing_items": missing,
+    }
+    atomic_write_json(bundle_root / "MANIFEST.json", manifest)
+    return manifest

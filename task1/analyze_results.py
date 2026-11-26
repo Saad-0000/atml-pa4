@@ -19,6 +19,7 @@ from common.io import (
     atomic_write_json,
     atomic_write_text,
     ensure_task_dirs,
+    export_final_report_bundle,
     read_json,
     read_jsonl,
     resolve_smoke_out_dir,
@@ -641,14 +642,31 @@ def analyze_task1(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     saved_plots = _generate_plots(dirs, cond_docs)
+    bundle = export_final_report_bundle(
+        dirs["root"],
+        rel_items=[
+            "configs/env_metadata.json",
+            "results/summary_all_conditions.csv",
+            "results/resource_accounting.csv",
+            "results/bootstrap_ci_p3_q3.json",
+            "results/structured_2to4_diagnostic.json",
+            "results/p3_allocation_and_sensitivity.json",
+            "results/q3_allocation_and_sensitivity.json",
+            "results/condition_status.json",
+            "evidence/qualitative_cases.json",
+            "plots/",
+        ],
+    )
     print(
         f"[Task 1 Analysis] Wrote summary_all_conditions.csv, resource_accounting.csv, "
-        f"bootstrap_ci_p3_q3.json, qualitative_cases.json, and {len(saved_plots)} plot(s).",
+        f"bootstrap_ci_p3_q3.json, qualitative_cases.json, {len(saved_plots)} plot(s), "
+        f"and exported {len(bundle['copied_files'])} final file(s) to {bundle['bundle_root']}.",
         flush=True,
     )
     return {
         "conditions_found": sorted(cond_docs.keys()),
         "plots": saved_plots,
+        "final_report_bundle": bundle,
     }
 
 

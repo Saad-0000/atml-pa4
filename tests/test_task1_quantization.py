@@ -229,6 +229,11 @@ class TestTask1Quantization(unittest.TestCase):
             ci_doc = read_json(smoke_root / "results" / "bootstrap_ci_p3_q3.json")
             self.assertEqual(ci_doc["comparisons"]["q3_minus_q2_int4"]["status"], "completed")
             self.assertEqual(ci_doc["comparisons"]["q3_minus_q2_int3"]["status"], "completed")
+            bundle_manifest = smoke_root / "final_report_bundle" / "MANIFEST.json"
+            self.assertTrue(bundle_manifest.exists())
+            self.assertTrue(
+                (smoke_root / "final_report_bundle" / "results" / "summary_all_conditions.csv").exists()
+            )
 
 
 if __name__ == "__main__":
