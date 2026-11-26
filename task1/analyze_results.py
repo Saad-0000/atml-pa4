@@ -227,10 +227,11 @@ def _generate_plots(
             linestyle="--",
             label="FP16 Baseline",
         )
+    axes[0].set_yscale("log")
     axes[0].set_xlabel("Eligible-Weight Sparsity (%)")
-    axes[0].set_ylabel("WikiText-2 Perplexity (lower is better)")
+    axes[0].set_ylabel("WikiText-2 Perplexity (log scale, lower is better)")
     axes[0].set_title("Pruning: Perplexity vs. Sparsity")
-    axes[0].grid(True, alpha=0.3)
+    axes[0].grid(True, which="both", alpha=0.3)
     axes[0].legend(fontsize=8)
     axes[1].set_xlabel("Eligible-Weight Sparsity (%)")
     axes[1].set_ylabel("HellaSwag acc_norm (%, paired 512 diag)")
@@ -296,98 +297,216 @@ def _generate_plots(
     plt.close(fig)
     saved_plots.append(str(q_path))
 
-    # 3. P3 sensitivity & allocation heatmap
+    # 3. P3 sensitivity & allocation heatmap (2x2 grid: s50 on row 0, s75 on row 1)
+    proj_names = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     p3_file = dirs["results"] / "p3_allocation_and_sensitivity.json"
     if p3_file.exists():
         p3_doc = read_json(p3_file)
-        first_key = next(iter(p3_doc.get("by_sparsity", {})), None)
-        if first_key is not None:
-            units = p3_doc["by_sparsity"][first_key]["selected_allocation"]["per_unit"]
-            proj_names = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-            n_layers = max(u["layer_idx"] for u in units) + 1
-            sens_grid = np.zeros((n_layers, len(proj_names)))
-            spar_grid = np.zeros((n_layers, len(proj_names)))
-            for u in units:
-                j = proj_names.index(u["proj_name"])
-                sens_grid[u["layer_idx"], j] = u["sensitivity"]
-                spar_grid[u["layer_idx"], j] = u["sparsity"]
-            fig, axes = plt.subplots(1, 2, figsize=(11, 5))
-            im0 = axes[0].imshow(sens_grid, aspect="auto", cmap="viridis")
-            axes[0].set_xticks(range(len(proj_names)))
-            axes[0].set_xticklabels(proj_names, rotation=35, ha="right")
-            axes[0].set_ylabel("Transformer Layer")
-            axes[0].set_title(f"P3 Sensitivity ({first_key})")
-            fig.colorbar(im0, ax=axes[0])
-            im1 = axes[1].imshow(spar_grid, aspect="auto", cmap="magma_r", vmin=0.10, vmax=0.85)
-            axes[1].set_xticks(range(len(proj_names)))
-            axes[1].set_xticklabels(proj_names, rotation=35, ha="right")
-            axes[1].set_ylabel("Transformer Layer")
-            axes[1].set_title(f"P3 Allocated Sparsity ({first_key})")
-            fig.colorbar(im1, ax=axes[1])
+        by_sp = p3_doc.get("by_sparsity", {})
+        sp_keys = [k for k in ("s50", "s75") if k in by_sp]
+        if not sp_keys:
+            sp_keys = list(by_sp.keys())
+        if sp_keys:
+            n_rows = len(sp_keys)
+            fig, axes = plt.subplots(n_rows, 2, figsize=(11.5, 4.4 * n_rows), squeeze=False)
+            for row_idx, sp_key in enumerate(sp_keys):
+                units = by_sp[sp_key]["selected_allocation"]["per_unit"]
+                n_layers = max(u["layer_idx"] for u in units) + 1
+                sens_grid = np.zeros((n_layers, len(proj_names)))
+                spar_grid = np.zeros((n_layers, len(proj_names)))
+                for u in units:
+                    j = proj_names.index(u["proj_name"])
+                    sens_grid[u["layer_idx"], j] = u["sensitivity"]
+                    spar_grid[u["layer_idx"], j] = u["sparsity"]
+
+                ax_l, ax_r = axes[row_idx, 0], axes[row_idx, 1]
+                im0 = ax_l.imshow(sens_grid, aspect="auto", cmap="viridis")
+                ax_l.set_xticks(range(len(proj_names)))
+                ax_l.set_xticklabels(proj_names, rotation=35, ha="right")
+                ax_l.set_ylabel("Transformer Layer")
+                ax_l.set_title(f"P3 Sensitivity ({sp_key})")
+                fig.colorbar(im0, ax=ax_l)
+
+                im1 = ax_r.imshow(spar_grid, aspect="auto", cmap="magma_r", vmin=0.10, vmax=0.85)
+                ax_r.set_xticks(range(len(proj_names)))
+                ax_r.set_xticklabels(proj_names, rotation=35, ha="right")
+                ax_r.set_ylabel("Transformer Layer")
+                ax_r.set_title(f"P3 Allocated Sparsity ({sp_key})")
+                fig.colorbar(im1, ax=ax_r)
+
             fig.tight_layout()
             p3_plot = plots_dir / "p3_sensitivity_and_allocation.png"
             fig.savefig(p3_plot, dpi=300)
             plt.close(fig)
             saved_plots.append(str(p3_plot))
 
-    # 4. Q3 sensitivity & bit-width allocation heatmap
+    # 4. Q3 sensitivity & bit-width allocation heatmap (2x2 grid: int4 on row 0, int3 on row 1)
     q3_file = dirs["results"] / "q3_allocation_and_sensitivity.json"
     if q3_file.exists():
         q3_doc = read_json(q3_file)
-        first_key = next(iter(q3_doc.get("by_budget", {})), None)
-        if first_key is not None:
-            units = q3_doc["by_budget"][first_key]["per_unit"]
-            proj_names = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-            n_layers = max(u["layer_idx"] for u in units) + 1
-            err_grid = np.zeros((n_layers, len(proj_names)))
-            bit_grid = np.zeros((n_layers, len(proj_names)))
-            for u in units:
-                j = proj_names.index(u["proj_name"])
-                err_grid[u["layer_idx"], j] = u["calib_rel_l2_err_at_assigned_bits"]
-                bit_grid[u["layer_idx"], j] = u["assigned_bits"]
-            fig, axes = plt.subplots(1, 2, figsize=(11, 5))
-            im0 = axes[0].imshow(err_grid, aspect="auto", cmap="viridis")
-            axes[0].set_xticks(range(len(proj_names)))
-            axes[0].set_xticklabels(proj_names, rotation=35, ha="right")
-            axes[0].set_ylabel("Transformer Layer")
-            axes[0].set_title(f"Q3 Calib Rel L2 Error ({first_key})")
-            fig.colorbar(im0, ax=axes[0])
-            im1 = axes[1].imshow(bit_grid, aspect="auto", cmap="coolwarm", vmin=2, vmax=8)
-            axes[1].set_xticks(range(len(proj_names)))
-            axes[1].set_xticklabels(proj_names, rotation=35, ha="right")
-            axes[1].set_ylabel("Transformer Layer")
-            axes[1].set_title(f"Q3 Assigned Bit Width ({first_key})")
-            fig.colorbar(im1, ax=axes[1])
+        by_bud = q3_doc.get("by_budget", {})
+        bud_keys = [k for k in ("int4", "int3") if k in by_bud]
+        if not bud_keys:
+            bud_keys = list(by_bud.keys())
+        if bud_keys:
+            n_rows = len(bud_keys)
+            fig, axes = plt.subplots(n_rows, 2, figsize=(11.5, 4.4 * n_rows), squeeze=False)
+            for row_idx, bud_key in enumerate(bud_keys):
+                units = by_bud[bud_key]["per_unit"]
+                n_layers = max(u["layer_idx"] for u in units) + 1
+                err_grid = np.zeros((n_layers, len(proj_names)))
+                bit_grid = np.zeros((n_layers, len(proj_names)))
+                for u in units:
+                    j = proj_names.index(u["proj_name"])
+                    err_grid[u["layer_idx"], j] = u["calib_rel_l2_err_at_assigned_bits"]
+                    bit_grid[u["layer_idx"], j] = u["assigned_bits"]
+
+                ax_l, ax_r = axes[row_idx, 0], axes[row_idx, 1]
+                im0 = ax_l.imshow(err_grid, aspect="auto", cmap="viridis")
+                ax_l.set_xticks(range(len(proj_names)))
+                ax_l.set_xticklabels(proj_names, rotation=35, ha="right")
+                ax_l.set_ylabel("Transformer Layer")
+                ax_l.set_title(f"Q3 Calibration Rel L2 Error ({bud_key})")
+                fig.colorbar(im0, ax=ax_l)
+
+                im1 = ax_r.imshow(bit_grid, aspect="auto", cmap="coolwarm", vmin=2, vmax=8)
+                ax_r.set_xticks(range(len(proj_names)))
+                ax_r.set_xticklabels(proj_names, rotation=35, ha="right")
+                ax_r.set_ylabel("Transformer Layer")
+                ax_r.set_title(f"Q3 Assigned Bit Width ({bud_key})")
+                fig.colorbar(im1, ax=ax_r)
+
             fig.tight_layout()
             q3_plot = plots_dir / "q3_sensitivity_and_allocation.png"
             fig.savefig(q3_plot, dpi=300)
             plt.close(fig)
             saved_plots.append(str(q3_plot))
 
-    # 5. Calibration output error vs held-out WikiText-2 PPL diagnostic
-    xs_err, ys_ppl, labels_err = [], [], []
-    for cid, doc in cond_docs.items():
-        if cid == "fp16_baseline":
-            continue
-        ce = doc.get("calibration_output_error")
-        if ce and "mean_projection_rel_l2_error" in ce:
-            xs_err.append(float(ce["mean_projection_rel_l2_error"]))
-            ys_ppl.append(float(doc["quality"]["wikitext2"]["perplexity"]))
-            labels_err.append(cid)
-    if xs_err:
-        fig, ax = plt.subplots(figsize=(7, 4.5))
-        ax.scatter(xs_err, ys_ppl, s=45)
-        for x, y, lbl in zip(xs_err, ys_ppl, labels_err):
-            ax.annotate(lbl, (x, y), fontsize=7, alpha=0.85, xytext=(3, 3), textcoords="offset points")
+    # 5. Calibration output error vs held-out WikiText-2 PPL diagnostic (log-y, family-coded, non-overlapping labels)
+    family_styles: list[tuple[str, str, str, list[str]]] = [
+        ("P1 Magnitude", "#1f77b4", "o", ["p1_magnitude_s25", "p1_magnitude_s50", "p1_magnitude_s75"]),
+        ("P2 Wanda", "#ff7f0e", "s", ["p2_wanda_s25", "p2_wanda_s50", "p2_wanda_s75"]),
+        ("P3 Nonuniform", "#2ca02c", "^", ["p3_nonuniform_s50", "p3_nonuniform_s75"]),
+        ("P2 Wanda 2:4", "#d62728", "D", ["p2_wanda_2to4_s50"]),
+        ("Q1 Uniform PTQ", "#9467bd", "v", ["q1_uniform_int8", "q1_uniform_int4", "q1_uniform_int3"]),
+        ("Q2 AWQ", "#8c564b", "P", ["q2_awq_int8", "q2_awq_int4", "q2_awq_int3"]),
+        ("Q3 Mixed AWQ", "#e377c2", "*", ["q3_mixed_int4", "q3_mixed_int3"]),
+    ]
+    short_names = {
+        "p1_magnitude_s25": "P1-25%",
+        "p1_magnitude_s50": "P1-50%",
+        "p1_magnitude_s75": "P1-75%",
+        "p2_wanda_s25": "P2-25%",
+        "p2_wanda_s50": "P2-50%",
+        "p2_wanda_s75": "P2-75%",
+        "p2_wanda_2to4_s50": "P2-2:4",
+        "p3_nonuniform_s50": "P3-50%",
+        "p3_nonuniform_s75": "P3-75%",
+        "q1_uniform_int8": "Q1-8b",
+        "q1_uniform_int4": "Q1-4b",
+        "q1_uniform_int3": "Q1-3b",
+        "q2_awq_int8": "Q2-8b",
+        "q2_awq_int4": "Q2-4b",
+        "q2_awq_int3": "Q2-3b",
+        "q3_mixed_int4": "Q3-4b",
+        "q3_mixed_int3": "Q3-3b",
+    }
+
+    pts_to_annotate: list[tuple[float, float, str, str]] = []
+    fig, ax = plt.subplots(figsize=(9.0, 5.5))
+    for fam_label, color, marker, cids in family_styles:
+        xs_f, ys_f = [], []
+        for cid in cids:
+            doc = cond_docs.get(cid)
+            if doc is None:
+                continue
+            ce = doc.get("calibration_output_error")
+            if ce and "mean_projection_rel_l2_error" in ce:
+                x_val = float(ce["mean_projection_rel_l2_error"])
+                y_val = float(doc["quality"]["wikitext2"]["perplexity"])
+                xs_f.append(x_val)
+                ys_f.append(y_val)
+                pts_to_annotate.append((x_val, y_val, short_names.get(cid, cid), color))
+        if xs_f:
+            ms = 90 if marker == "*" else 55
+            ax.scatter(xs_f, ys_f, color=color, marker=marker, s=ms, label=fam_label, zorder=4)
+
+    if pts_to_annotate:
+        ax.set_yscale("log")
+        if base is not None:
+            base_ppl = float(base["quality"]["wikitext2"]["perplexity"])
+            ax.axhline(
+                base_ppl,
+                color="gray",
+                linestyle="--",
+                linewidth=1.1,
+                label=f"FP16 Baseline ({base_ppl:.2f})",
+                zorder=2,
+            )
+
+        # Compute axis spans in (x, log10(y)) to greedily place non-overlapping staggered labels
+        xs_all = [p[0] for p in pts_to_annotate]
+        log_ys_all = [math.log10(max(p[1], 1e-9)) for p in pts_to_annotate]
+        x_span = max(max(xs_all) - min(xs_all), 1e-3)
+        y_span = max(max(log_ys_all) - min(log_ys_all), 0.25)
+
+        # Pad limits slightly so staggered labels stay cleanly inside frame
+        ax.set_xlim(min(xs_all) - 0.08 * x_span, max(xs_all) + 0.16 * x_span)
+        y_min_plot = 10.0 ** (min(log_ys_all) - 0.16 * y_span)
+        y_max_plot = 10.0 ** (max(log_ys_all) + 0.16 * y_span)
+        ax.set_ylim(y_min_plot, y_max_plot)
+
+        candidate_offsets = [
+            (12, 10), (12, -12), (-38, 12), (-38, -14),
+            (22, 22), (22, -22), (-46, 24), (-46, -24),
+            (32, 4), (-52, 4), (10, 32), (10, -32),
+            (36, 30), (36, -30), (-56, 34), (-56, -34),
+            (46, 16), (46, -16), (0, 40), (0, -40),
+        ]
+        placed_boxes: list[tuple[float, float]] = []
+        # Sort by (x, log_y) so nearby points deterministically pick distinct offset slots
+        for x_val, y_val, lbl, color in sorted(
+            pts_to_annotate, key=lambda t: (round(t[0], 4), t[1])
+        ):
+            nx = (x_val - min(xs_all)) / x_span
+            ny = (math.log10(max(y_val, 1e-9)) - min(log_ys_all)) / y_span
+
+            chosen = candidate_offsets[0]
+            for dx_pt, dy_pt in candidate_offsets:
+                # Approximate normalized label center (figure ~648x396 pt)
+                cx = nx + dx_pt / 480.0
+                cy = ny + dy_pt / 280.0
+                if all(abs(cx - px) > 0.095 or abs(cy - py) > 0.055 for px, py in placed_boxes):
+                    chosen = (dx_pt, dy_pt)
+                    placed_boxes.append((cx, cy))
+                    break
+            else:
+                placed_boxes.append((nx + chosen[0] / 480.0, ny + chosen[1] / 280.0))
+
+            ax.annotate(
+                lbl,
+                (x_val, y_val),
+                xytext=chosen,
+                textcoords="offset points",
+                fontsize=7.5,
+                color="#222222",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.75),
+                arrowprops=dict(arrowstyle="-", color="gray", lw=0.6, alpha=0.75),
+                zorder=5,
+            )
+
         ax.set_xlabel("Mean Projection Relative L2 Calibration Error")
-        ax.set_ylabel("Held-Out WikiText-2 Perplexity")
+        ax.set_ylabel("Held-Out WikiText-2 Perplexity (log scale)")
         ax.set_title("Calibration Output Error vs. Held-Out Perplexity")
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=8, loc="upper left", framealpha=0.9)
         fig.tight_layout()
         c_plot = plots_dir / "calib_error_vs_heldout.png"
         fig.savefig(c_plot, dpi=300)
         plt.close(fig)
         saved_plots.append(str(c_plot))
+    else:
+        plt.close(fig)
 
     return saved_plots
 

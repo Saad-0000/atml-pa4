@@ -234,6 +234,104 @@ class TestTask1Quantization(unittest.TestCase):
             self.assertTrue(
                 (smoke_root / "final_report_bundle" / "results" / "summary_all_conditions.csv").exists()
             )
+            self.assertTrue(
+                (smoke_root / "final_report_bundle" / "plots" / "calib_error_vs_heldout.png").exists()
+            )
+            self.assertTrue(
+                (smoke_root / "final_report_bundle" / "plots" / "q3_sensitivity_and_allocation.png").exists()
+            )
+
+    def test_analyze_plots_all_18_conditions_and_2x2_heatmaps(self) -> None:
+        from common.io import atomic_write_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = _make_synthetic_data_dir(root)
+            out_dir = root / "task1"
+            res_dir = out_dir / "results"
+            res_dir.mkdir(parents=True, exist_ok=True)
+
+            def _make_cond(cid: str, fam: str, s: float, b: float, pb: int, wt2: float, err: float) -> dict:
+                return {
+                    "status": "completed",
+                    "condition": cid,
+                    "family": fam,
+                    "storage": {
+                        "achieved_sparsity": s,
+                        "nominal_bits_per_eligible_weight": b,
+                        "dense_fp16_total_bytes": 3_087_000_000,
+                        "sparse_16bit_total_bytes": int(3_087_000_000 * (1 - 0.8 * s)),
+                        "serialized_packed_total_bytes": pb,
+                    },
+                    "quality": {
+                        "wikitext2": {"scored_tokens": 50000, "mean_nll": 2.8, "perplexity": wt2},
+                        "c4_validation": {"scored_tokens": 50000, "mean_nll": 2.9, "perplexity": wt2 * 1.1},
+                        "hellaswag": {
+                            "num_examples": 2000, "acc_raw": 0.5, "acc_norm": 0.65,
+                            "diag_subset_size": 512, "diag_acc_norm": 0.64,
+                        },
+                    },
+                    "calibration_output_error": {"mean_projection_rel_l2_error": err},
+                    "benchmark": {"prefill": {"512": {"mean_ms": 10.0}, "2048": {"mean_ms": 40.0}}, "decode": {"mean_ms": 50.0, "decode_tokens": 64}},
+                    "timing_sec": {"total_wall_sec": 12.0},
+                }
+
+            atomic_write_json(res_dir / "baseline_fp16.json", _make_cond("fp16_baseline", "baseline", 0.0, 16.0, 3_087_000_000, 16.11, 0.0))
+            specs = [
+                ("p1_magnitude_s25", "pruning", 0.25, 16, 3_087_000_000, 18.5, 0.08),
+                ("p1_magnitude_s50", "pruning", 0.50, 16, 3_087_000_000, 127.8, 0.28),
+                ("p1_magnitude_s75", "pruning", 0.75, 16, 3_087_000_000, 1.58e6, 0.68),
+                ("p2_wanda_s25", "pruning", 0.25, 16, 3_087_000_000, 16.9, 0.06),
+                ("p2_wanda_s50", "pruning", 0.50, 16, 3_087_000_000, 24.7, 0.14),
+                ("p2_wanda_s75", "pruning", 0.75, 16, 3_087_000_000, 2.29e4, 0.45),
+                ("p2_wanda_2to4_s50", "pruning", 0.50, 16, 3_087_000_000, 48.0, 0.20),
+                ("p3_nonuniform_s50", "pruning", 0.50, 16, 3_087_000_000, 24.1, 0.13),
+                ("p3_nonuniform_s75", "pruning", 0.75, 16, 3_087_000_000, 1.80e4, 0.41),
+                ("q1_uniform_int8", "quantization", 0.0, 8, 1_800_000_000, 16.12, 0.005),
+                ("q1_uniform_int4", "quantization", 0.0, 4, 1_150_000_000, 17.5, 0.07),
+                ("q1_uniform_int3", "quantization", 0.0, 3, 980_000_000, 29.0, 0.16),
+                ("q2_awq_int8", "quantization", 0.0, 8, 1_801_000_000, 16.12, 0.004),
+                ("q2_awq_int4", "quantization", 0.0, 4, 1_151_000_000, 16.9, 0.055),
+                ("q2_awq_int3", "quantization", 0.0, 3, 981_000_000, 21.5, 0.12),
+                ("q3_mixed_int4", "quantization", 0.0, 4, 1_150_500_000, 16.7, 0.05),
+                ("q3_mixed_int3", "quantization", 0.0, 3, 980_500_000, 20.1, 0.11),
+            ]
+            for s in specs:
+                atomic_write_json(res_dir / f"condition_{s[0]}.json", _make_cond(*s))
+
+            projs = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            p3_units = [
+                {"layer_idx": l, "proj_name": p, "sensitivity": 0.01 * (l + 1), "sparsity": 0.50}
+                for l in range(4) for p in projs
+            ]
+            atomic_write_json(
+                res_dir / "p3_allocation_and_sensitivity.json",
+                {"by_sparsity": {"s50": {"selected_allocation": {"per_unit": p3_units}}, "s75": {"selected_allocation": {"per_unit": p3_units}}}},
+            )
+            q3_units = [
+                {"layer_idx": l, "proj_name": p, "calib_rel_l2_err_at_assigned_bits": 0.05 * (l + 1), "assigned_bits": 4}
+                for l in range(4) for p in projs
+            ]
+            atomic_write_json(
+                res_dir / "q3_allocation_and_sensitivity.json",
+                {"by_budget": {"int4": {"per_unit": q3_units}, "int3": {"per_unit": q3_units}}},
+            )
+
+            out = analyze_task1(
+                build_analyze_parser().parse_args(
+                    ["--data-dir", str(data_dir), "--out-dir", str(out_dir), "--seed", "6304"]
+                )
+            )
+            self.assertEqual(len(out["plots"]), 5)
+            for pname in (
+                "pruning_resource_quality.png",
+                "quantization_resource_quality.png",
+                "p3_sensitivity_and_allocation.png",
+                "q3_sensitivity_and_allocation.png",
+                "calib_error_vs_heldout.png",
+            ):
+                self.assertTrue((out_dir / "plots" / pname).exists())
+                self.assertTrue((out_dir / "final_report_bundle" / "plots" / pname).exists())
 
 
 if __name__ == "__main__":
