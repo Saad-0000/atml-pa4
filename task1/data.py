@@ -46,6 +46,21 @@ def load_ppl_windows(
     return path, records
 
 
+def load_c4_sequences(
+    data_dir: str | Path,
+    split: str,
+    limit: int | None = None,
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Load locked C4 calibration (128x512) or development (32x512) sequences."""
+    if split not in ("c4_calibration", "c4_development"):
+        raise ValueError(f"Unknown C4 sequence split '{split}'.")
+    path = resolve_manifest_path(data_dir, split)
+    records = read_jsonl(path, limit=limit)
+    if not records:
+        raise ValueError(f"C4 manifest is empty: {path}")
+    return path, records
+
+
 def load_hellaswag_val(
     data_dir: str | Path,
     limit: int | None = None,
