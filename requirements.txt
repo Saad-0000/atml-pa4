@@ -1,0 +1,17 @@
+# Pinned versions required by ATML PA4 Shared Experimental Conventions
+transformers==4.57.1
+huggingface_hub==0.36.2
+
+# Standard scientific / ML stack (matched to ATML_PA4_Colab_Runner.ipynb)
+torch>=2.1.0
+numpy>=1.24.0
+peft
+datasets
+accelerate
+scipy
+matplotlib
+seaborn
+pyyaml
+tqdm
+sentencepiece
+protobuf
