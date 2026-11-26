@@ -12,6 +12,60 @@ import torch.nn.functional as F
 from common.timing import get_memory_stats, reset_peak_memory, sync_device
 
 
+def resolve_target_offsets(
+    rec: dict[str, Any],
+    seq_len: int,
+    suite_name: str,
+    window_idx: int,
+) -> list[int]:
+    """Resolve scored target token indices from a locked perplexity window record.
+
+    Supports both:
+    - 2-element contiguous range [start, end) (half-open, end - start == scored_tokens)
+      or [start, end] (inclusive, end - start + 1 == scored_tokens), as used by
+      atml-pa4-datasets;
+    - explicit list of target indices of length scored_tokens.
+    """
+    raw_offsets = rec.get("score_target_offsets")
+    if raw_offsets is None:
+        offsets = list(range(1, seq_len))
+        expected_scored = int(rec.get("scored_tokens", len(offsets)))
+    else:
+        expected_scored = int(rec.get("scored_tokens", len(raw_offsets)))
+        if len(raw_offsets) == 2:
+            start, end = int(raw_offsets[0]), int(raw_offsets[1])
+            if end - start == expected_scored and 1 <= start < end <= seq_len:
+                offsets = list(range(start, end))
+            elif end - start + 1 == expected_scored and 1 <= start <= end < seq_len:
+                offsets = list(range(start, end + 1))
+            elif expected_scored == 2:
+                offsets = [start, end]
+            else:
+                raise ValueError(
+                    f"Suite '{suite_name}' window {window_idx}: cannot interpret "
+                    f"score_target_offsets={raw_offsets} with scored_tokens={expected_scored} "
+                    f"and seq_len={seq_len}."
+                )
+        else:
+            offsets = [int(o) for o in raw_offsets]
+
+    if len(offsets) != expected_scored:
+        raise ValueError(
+            f"Suite '{suite_name}' window {window_idx}: resolved {len(offsets)} offsets "
+            f"!= scored_tokens={expected_scored} (raw={raw_offsets})."
+        )
+    if len(set(offsets)) != len(offsets):
+        raise ValueError(
+            f"Suite '{suite_name}' window {window_idx} contains duplicate score_target_offsets."
+        )
+    if any(o < 1 or o >= seq_len for o in offsets):
+        raise ValueError(
+            f"Suite '{suite_name}' window {window_idx} has out-of-range offset "
+            f"(must satisfy 1 <= offset < {seq_len})."
+        )
+    return offsets
+
+
 def evaluate_perplexity(
     model: torch.nn.Module,
     windows: list[dict[str, Any]],
@@ -45,24 +99,7 @@ def evaluate_perplexity(
                     f"Suite '{suite_name}' window {idx} has length {seq_len} < 2."
                 )
 
-            offsets = rec.get("score_target_offsets")
-            if offsets is None:
-                offsets = list(range(1, seq_len))
-            expected_scored = rec.get("scored_tokens", len(offsets))
-            if len(offsets) != int(expected_scored):
-                raise ValueError(
-                    f"Suite '{suite_name}' window {idx}: len(score_target_offsets)="
-                    f"{len(offsets)} != scored_tokens={expected_scored}."
-                )
-            if len(set(offsets)) != len(offsets):
-                raise ValueError(
-                    f"Suite '{suite_name}' window {idx} contains duplicate score_target_offsets."
-                )
-            if any(o < 1 or o >= seq_len for o in offsets):
-                raise ValueError(
-                    f"Suite '{suite_name}' window {idx} has out-of-range offset "
-                    f"(must satisfy 1 <= offset < {seq_len})."
-                )
+            offsets = resolve_target_offsets(rec, seq_len, suite_name, idx)
 
             input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
             outputs = model(input_ids=input_ids, use_cache=False)

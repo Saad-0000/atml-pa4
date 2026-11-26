@@ -158,8 +158,8 @@ class TestTask1Baseline(unittest.TestCase):
             },
             {
                 "token_ids": [15, 25, 35, 45, 55],
-                "score_target_offsets": [2, 4],
-                "scored_tokens": 2,
+                "score_target_offsets": [1, 3, 4],
+                "scored_tokens": 3,
             },
         ]
         summary, per_win = evaluate_perplexity(
@@ -180,10 +180,23 @@ class TestTask1Baseline(unittest.TestCase):
                             reduction="sum",
                         ).item()
                     )
-        self.assertEqual(summary["scored_tokens"], 7)
+        self.assertEqual(summary["scored_tokens"], 8)
         self.assertEqual(len(per_win), 2)
         self.assertAlmostEqual(summary["total_nll"], ref_nll, places=5)
-        self.assertAlmostEqual(summary["perplexity"], math.exp(ref_nll / 7), places=4)
+        self.assertAlmostEqual(summary["perplexity"], math.exp(ref_nll / 8), places=4)
+
+        # Verify 2-element half-open [start, end) range format used by atml-pa4-datasets
+        range_windows = [
+            {
+                "token_ids": [10, 20, 30, 40, 50, 60, 70],
+                "score_target_offsets": [1, 7],
+                "scored_tokens": 6,
+            }
+        ]
+        range_summary, _ = evaluate_perplexity(
+            model, range_windows, device=device, suite_name="range_test"
+        )
+        self.assertEqual(range_summary["scored_tokens"], 6)
 
         # Offset 0 must be rejected (first token cannot be scored)
         bad_windows = [

@@ -70,7 +70,7 @@ def load_base_model_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
     )
     model.to(dev)
     model.eval()
