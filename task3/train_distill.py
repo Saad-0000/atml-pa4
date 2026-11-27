@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import random
 import sys
 import time
@@ -18,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -71,29 +73,64 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class LoRALinear(nn.Module):
+    """Exact Hu et al. (2022) LoRA wrapper: frozen FP16 base + FP32 low-rank adapters.
+
+    Avoids peft/torchao version conflicts on Colab while preserving identical
+    r=8, alpha=16, dropout=0.0 math, parameter counts, and FP16 merging.
+    """
+
+    def __init__(self, base: nn.Linear, r: int = 8, alpha: float = 16.0) -> None:
+        super().__init__()
+        self.base = base
+        self.base.weight.requires_grad_(False)
+        if self.base.bias is not None:
+            self.base.bias.requires_grad_(False)
+        self.r = int(r)
+        self.alpha = float(alpha)
+        self.scaling = self.alpha / float(self.r)
+        dev = base.weight.device
+        self.lora_A = nn.Parameter(torch.empty((self.r, base.in_features), dtype=torch.float32, device=dev))
+        self.lora_B = nn.Parameter(torch.zeros((base.out_features, self.r), dtype=torch.float32, device=dev))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5.0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base(x)
+        lora_out = F.linear(F.linear(x.float(), self.lora_A), self.lora_B) * self.scaling
+        return base_out + lora_out.to(dtype=base_out.dtype)
+
+    def merge_into_base(self) -> nn.Linear:
+        with torch.no_grad():
+            delta = (self.lora_B.float() @ self.lora_A.float()) * self.scaling
+            self.base.weight.data.copy_(
+                (self.base.weight.data.float() + delta).to(dtype=self.base.weight.dtype)
+            )
+        return self.base
+
+
 def _wrap_student_with_lora(student_base: torch.nn.Module) -> tuple[torch.nn.Module, int, int]:
     """Attach FP32 LoRA (r=8, alpha=16, dropout=0) on q/k/v/o_proj over frozen backbone."""
-    from peft import LoraConfig, get_peft_model
-
     for p in student_base.parameters():
         p.requires_grad_(False)
-    lora_cfg = LoraConfig(
-        r=8,
-        lora_alpha=16,
-        lora_dropout=0.0,
-        target_modules=LORA_TARGET_MODULES,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(student_base, lora_cfg)
-    trainable = 0
-    total = 0
-    for p in model.parameters():
-        total += int(p.numel())
-        if p.requires_grad:
-            p.data = p.data.float()  # FP32 adapters & optimizer states (PDF p. 13)
-            trainable += int(p.numel())
-    return model, trainable, total
+
+    target_set = set(LORA_TARGET_MODULES)
+    for parent_name, parent in list(student_base.named_modules()):
+        for child_name, child in list(parent.named_children()):
+            if child_name in target_set and isinstance(child, nn.Linear):
+                setattr(parent, child_name, LoRALinear(child, r=8, alpha=16.0))
+
+    trainable = sum(int(p.numel()) for p in student_base.parameters() if p.requires_grad)
+    total = sum(int(p.numel()) for p in student_base.parameters())
+    return student_base, trainable, total
+
+
+def _unwrap_and_merge_lora(model: torch.nn.Module) -> torch.nn.Module:
+    """Merge every LoRALinear into its underlying nn.Linear and replace in-place."""
+    for _, parent in list(model.named_modules()):
+        for child_name, child in list(parent.named_children()):
+            if isinstance(child, LoRALinear):
+                setattr(parent, child_name, child.merge_into_base())
+    return model
 
 
 def _get_lora_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
@@ -131,10 +168,10 @@ def _merge_and_verify_adapter(
 
     t_merge0 = time.perf_counter()
     fresh_base = fresh_backbone_fn().to(device)
-    fresh_peft, _, _ = _wrap_student_with_lora(fresh_base)
-    _load_lora_state_dict(fresh_peft, lora_state)
-    fresh_peft.eval()
-    merged_model = fresh_peft.merge_and_unload()
+    fresh_lora, _, _ = _wrap_student_with_lora(fresh_base)
+    _load_lora_state_dict(fresh_lora, lora_state)
+    fresh_lora.eval()
+    merged_model = _unwrap_and_merge_lora(fresh_lora)
     target_dtype = torch.float16 if device.type == "cuda" else torch.float32
     merged_model = merged_model.to(dtype=target_dtype).eval()
     merge_sec = time.perf_counter() - t_merge0
